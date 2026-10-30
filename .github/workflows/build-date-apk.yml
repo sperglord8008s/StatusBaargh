@@ -3,6 +3,7 @@ name: Build StatusBaargh APK
 on:
   push:
     branches:
+      - master
       - feature/two-line-date-status-icon
   workflow_dispatch:
 
