@@ -617,7 +617,6 @@ class StatusService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
-            .setSilent(true)
 
         return try {
             builder.build()
