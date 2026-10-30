@@ -74,7 +74,10 @@
     <string name="notification">Notification</string>
     <string name="themeDesc">Colours, fonts, and effects</string>
     <string name="showDateStatusBar">Status-bar date</string>
-    <string name="showDateStatusBarDesc">Use two larger icons for the date: 1st over Jan, then Fri</string>
+    <string name="showDateStatusBarDesc">Keep the date beside the battery readout</string>
+    <string name="dateDisplayMode">Date display</string>
+    <string name="dateModeCycle">1 icon · cycling</string>
+    <string name="dateModeSplit">2 icons · fixed</string>
     <string name="showTimeToFull">Charge Time Estimate</string>
     <string name="showTimeToFullDesc">Show time remaining until fully charged in the notification</string>
     <string name="customization">Customization</string>

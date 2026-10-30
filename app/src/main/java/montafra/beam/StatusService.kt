@@ -47,6 +47,10 @@ class StatusService : Service() {
         // Weight of the notification icon text, matching Typeface.DEFAULT_BOLD. Fonts whose
         // wght axis stops lower are clamped to their own ceiling.
         private const val iconWeight = 700
+        // Refreshing once every seven seconds keeps the single date icon readable without
+        // constantly rebuilding notifications when the screen is on.
+        private const val dateCycleMs = 7_000L
+        private const val datePresenceCheckMs = 5_000L
         // Level alarms re-arm this many percent past their threshold, so boundary jitter
         // cannot fire them twice.
         private const val alarmLevelHysteresis = 2
@@ -87,7 +91,11 @@ class StatusService : Service() {
     private var showTimeToFull: Boolean = true
     private var showScreenTimeInNotification: Boolean = false
     private var showDateStatusBar: Boolean = false
+    private var dateDisplayMode: String = "cycle"
+    private var dateCycleStartedAtMs = SystemClock.elapsedRealtime()
     private var lastShownDate: LocalDate? = null
+    private var lastShownDatePhase = -1
+    private var lastDatePresenceCheckMs = 0L
     private var pollIntervalMs: Long = intervalMs
     private val alarmLow = Alarm("alarmLow", alarmLowNoteId, alarmLowDefaultThreshold)
     private val alarmHigh = Alarm("alarmHigh", alarmHighNoteId, alarmHighDefaultThreshold)
@@ -211,8 +219,18 @@ class StatusService : Service() {
         showTimeToFull = settings.getBoolean("showTimeToFull", true)
         showScreenTimeInNotification = settings.getBoolean("showScreenTimeInNotification", false)
         showDateStatusBar = settings.getBoolean("showDateStatusBar", false)
+        val newDateMode = settings.getString("dateDisplayMode", "cycle") ?: "cycle"
+        if (dateDisplayMode != newDateMode) {
+            // Remove the other mode's icon immediately instead of leaving a stale duplicate.
+            noteMgr.cancel(dateNoteId)
+            noteMgr.cancel(weekdayNoteId)
+        }
+        dateDisplayMode = newDateMode
+        dateCycleStartedAtMs = SystemClock.elapsedRealtime()
         // Refresh date icon even when the day is unchanged (font/theme settings can change).
         lastShownDate = null
+        lastShownDatePhase = -1
+        lastDatePresenceCheckMs = 0L
         pollIntervalMs = settings.getLong("pollIntervalMs", intervalMs)
         alarms.forEach { a ->
             a.enabled = settings.getBoolean("${a.prefix}Enabled", false)
@@ -577,9 +595,9 @@ class StatusService : Service() {
     }
 
     /**
-     * Android shrinks every status icon to about 24dp, so 31st Sat cannot fit in one.
-     * Use two ordinary notification slots: day/month, then the weekday. This requires
-     * no overlay, root access, or special permissions.
+     * Android shrinks every status icon to about 24dp. Split mode gives day/month and
+     * weekday their own slots; cycle mode alternates the two readable faces in one slot.
+     * No overlay, root access or special permissions are required.
      */
     private fun datePaint(): Paint = Paint(iconPaint).apply {
         isAntiAlias = true
@@ -638,40 +656,59 @@ class StatusService : Service() {
         return Icon.createWithBitmap(bitmap)
     }
 
-    private fun renderWeekdayIcon(date: LocalDate): Icon {
+    private fun renderWeekdayIcon(date: LocalDate, showMonth: Boolean = false): Icon {
         val density = resources.displayMetrics.density
         val size = (48f * density).roundToInt().coerceAtLeast(1)
         val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
         val paint = datePaint().apply {
             textAlign = Paint.Align.CENTER
             textSize = 33f * density
         }
-        val weekday = dateParts(date).second
-        val width = paint.measureText(weekday)
+        val (_, weekday, month) = dateParts(date)
         val maxWidth = size * 0.96f
+        val width = paint.measureText(weekday)
         if (width > maxWidth) paint.textSize *= maxWidth / width
-        Canvas(bitmap).drawText(weekday, size / 2f, size * 0.53f, paint)
+        canvas.drawText(weekday, size / 2f, size * 0.53f, paint)
+        if (showMonth) {
+            paint.textSize = 24f * density
+            val monthWidth = paint.measureText(month)
+            if (monthWidth > maxWidth) paint.textSize *= maxWidth / monthWidth
+            canvas.drawText(month, size / 2f, size * 0.88f, paint)
+        }
         return Icon.createWithBitmap(bitmap)
     }
 
-    private fun buildDateNotification(date: LocalDate, weekdayIcon: Boolean): Notification {
+    private fun buildDateNotification(
+        date: LocalDate,
+        weekdayIcon: Boolean,
+        showMonthOnWeekday: Boolean = false,
+    ): Notification {
         val (day, weekday, month) = dateParts(date)
         val fullDate = date.format(DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy", Locale.ENGLISH))
         val builder = Notification.Builder(this, dateChannelId)
-            .setSmallIcon(if (weekdayIcon) renderWeekdayIcon(date) else renderDayMonthIcon(date))
+            .setSmallIcon(
+                if (weekdayIcon) renderWeekdayIcon(date, showMonthOnWeekday)
+                else renderDayMonthIcon(date)
+            )
             .setContentTitle(if (weekdayIcon) "Weekday: $weekday" else "$day $month")
             .setContentText(fullDate)
             .setContentIntent(noteIntent)
             .setOngoing(true)
+            .setSilent(true)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
 
-        return try {
+        val notification = try {
             builder.build()
         } catch (e: RuntimeException) {
             Log.w(this::class.java.name, "Rendered date icon rejected", e)
             builder.setSmallIcon(R.drawable.ico_notification).build()
         }
+        // FLAG_ONGOING_EVENT alone is dismissible on newer Android versions.
+        // FLAG_NO_CLEAR expresses the user's intent to keep the status-bar date present.
+        notification.flags = notification.flags or Notification.FLAG_NO_CLEAR
+        return notification
     }
 
     private fun updateDateNotification() {
@@ -679,16 +716,52 @@ class StatusService : Service() {
             noteMgr.cancel(dateNoteId)
             noteMgr.cancel(weekdayNoteId)
             lastShownDate = null
+            lastShownDatePhase = -1
             return
         }
+
         val date = LocalDate.now()
-        if (lastShownDate == date) return
+        val now = SystemClock.elapsedRealtime()
+        val cycling = dateDisplayMode == "cycle"
+        val phase = if (cycling) {
+            (((now - dateCycleStartedAtMs).coerceAtLeast(0L) / dateCycleMs) % 2L).toInt()
+        } else -1
+        val contentChanged = lastShownDate != date || lastShownDatePhase != phase
+        val checkPresence = now - lastDatePresenceCheckMs >= datePresenceCheckMs
+
+        if (!contentChanged && !checkPresence) return
+
         try {
-            // Newer notifications usually appear first; post weekday before day/month
-            // so the visual order beside Beam's watts icon is "31st Sat" over "Oct".
-            noteMgr.notify(weekdayNoteId, buildDateNotification(date, weekdayIcon = true))
-            noteMgr.notify(dateNoteId, buildDateNotification(date, weekdayIcon = false))
+            // SystemUI may still allow Clear all / swipe-dismiss on some Android ROMs.
+            // Recover missing date entries on the existing battery polling loop.
+            val activeIds = if (checkPresence) {
+                noteMgr.activeNotifications.map { it.id }.toSet()
+            } else emptySet()
+            lastDatePresenceCheckMs = now
+
+            if (cycling) {
+                if (lastShownDate == null) noteMgr.cancel(weekdayNoteId)
+                if (contentChanged || (checkPresence && dateNoteId !in activeIds)) {
+                    noteMgr.notify(
+                        dateNoteId,
+                        buildDateNotification(
+                            date,
+                            weekdayIcon = phase == 1,
+                            showMonthOnWeekday = phase == 1,
+                        )
+                    )
+                }
+            } else {
+                // Post weekday first to favour the day/month then weekday ordering.
+                if (contentChanged || (checkPresence && weekdayNoteId !in activeIds)) {
+                    noteMgr.notify(weekdayNoteId, buildDateNotification(date, weekdayIcon = true))
+                }
+                if (contentChanged || (checkPresence && dateNoteId !in activeIds)) {
+                    noteMgr.notify(dateNoteId, buildDateNotification(date, weekdayIcon = false))
+                }
+            }
             lastShownDate = date
+            lastShownDatePhase = phase
         } catch (e: RuntimeException) {
             Log.e(this::class.java.name, "Failed to post date indicators", e)
         }
