@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -58,6 +59,9 @@ fun NotificationSettingsScreen(navController: BeamNavController) {
     }
     var showTimeToFull by remember { mutableStateOf(prefs.getBoolean("showTimeToFull", true)) }
     var showDateStatusBar by remember { mutableStateOf(prefs.getBoolean("showDateStatusBar", false)) }
+    var dateDisplayMode by remember {
+        mutableStateOf(prefs.getString("dateDisplayMode", "cycle") ?: "cycle")
+    }
     var showScreenTimeInNotification by remember {
         mutableStateOf(prefs.getBoolean("showScreenTimeInNotification", false))
     }
@@ -202,6 +206,41 @@ fun NotificationSettingsScreen(navController: BeamNavController) {
                             )
                         },
                     )
+                }
+                CardGap()
+                BeamCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = cardShapeMiddle(),
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = stringResource(R.string.dateDisplayMode),
+                            style = MaterialTheme.typography.titleSmall,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        val dateModes = listOf(
+                            "cycle" to stringResource(R.string.dateModeCycle),
+                            "split" to stringResource(R.string.dateModeSplit),
+                        )
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            dateModes.forEachIndexed { i, mode ->
+                                SegmentedButton(
+                                    selected = dateDisplayMode == mode.first,
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        dateDisplayMode = mode.first
+                                        prefs.edit().putString("dateDisplayMode", mode.first).commit()
+                                        context.sendBroadcast(
+                                            Intent().setPackage(context.packageName)
+                                                .setAction(settingsUpdateInd)
+                                        )
+                                    },
+                                    shape = SegmentedButtonDefaults.itemShape(i, dateModes.size),
+                                    label = { Text(mode.second) },
+                                )
+                            }
+                        }
+                    }
                 }
                 CardGap()
                 BeamCard(
