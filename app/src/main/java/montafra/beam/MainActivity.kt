@@ -48,6 +48,7 @@ const val noteChannelId = "$namespace.status.v6"
 const val noteId = 1
 const val dateChannelId = "$namespace.date.v1"
 const val dateNoteId = 5
+const val weekdayNoteId = 6
 const val alarmChannelId = "$namespace.alarms.v1"
 const val alarmLowNoteId = 2
 const val alarmHighNoteId = 3
