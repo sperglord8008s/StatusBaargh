@@ -73,6 +73,8 @@
     <string name="theme">Theme</string>
     <string name="notification">Notification</string>
     <string name="themeDesc">Colours, fonts, and effects</string>
+    <string name="showDateStatusBar">Status-bar date</string>
+    <string name="showDateStatusBarDesc">Show a separate two-line date icon (1st Fri / Jan)</string>
     <string name="showTimeToFull">Charge Time Estimate</string>
     <string name="showTimeToFullDesc">Show time remaining until fully charged in the notification</string>
     <string name="customization">Customization</string>
