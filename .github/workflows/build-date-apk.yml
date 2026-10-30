@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - master
-      - feature/two-line-date-status-icon
+      - "feature/**"
   workflow_dispatch:
 
 permissions:

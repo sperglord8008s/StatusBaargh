@@ -195,6 +195,7 @@ class StatusService : Service() {
         if (!notificationEnabled) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             noteMgr.cancel(dateNoteId)
+            noteMgr.cancel(weekdayNoteId)
         }
         battery.currentScalar = settings.getFloat("currentScalar", 1f).toDouble()
         battery.invertCurrent = settings.getBoolean("invertCurrent", false)
@@ -532,6 +533,7 @@ class StatusService : Service() {
             }
         } else {
             noteMgr.cancel(dateNoteId)
+            noteMgr.cancel(weekdayNoteId)
         }
 
         return START_STICKY
@@ -541,7 +543,10 @@ class StatusService : Service() {
         debug("onDestroy()")
         task.stop()
         if (initialized) unregisterReceiver(msgReceiver)
-        if (initialized) noteMgr.cancel(dateNoteId)
+        if (initialized) {
+            noteMgr.cancel(dateNoteId)
+            noteMgr.cancel(weekdayNoteId)
+        }
         super.onDestroy()
     }
 
@@ -571,29 +576,17 @@ class StatusService : Service() {
         return Icon.createWithBitmap(bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: bitmap)
     }
 
-    /** Render two date lines into a second, silent status-bar icon. */
-    private fun renderDateIcon(date: LocalDate): Icon {
-        val density = resources.displayMetrics.density
-        val size = (48f * density).roundToInt().coerceAtLeast(1)
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        val paint = Paint(iconPaint).apply { isAntiAlias = true }
-        val (firstLine, secondLine) = dateIconLines(date)
-        val maxWidth = size * 0.94f
-
-        fun drawLine(text: String, textSize: Float, baseline: Float) {
-            paint.textSize = textSize * density
-            val width = paint.measureText(text)
-            if (width > maxWidth) paint.textSize *= maxWidth / width
-            canvas.drawText(text, size / 2f, size * baseline, paint)
-        }
-
-        drawLine(firstLine, 20f, 0.45f)
-        drawLine(secondLine, 21f, 0.91f)
-        return Icon.createWithBitmap(bitmap)
+    /**
+     * Android shrinks every status icon to about 24dp, so 31st Sat cannot fit in one.
+     * Use two ordinary notification slots: day/month, then the weekday. This requires
+     * no overlay, root access, or special permissions.
+     */
+    private fun datePaint(): Paint = Paint(iconPaint).apply {
+        isAntiAlias = true
+        typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
     }
 
-    private fun dateIconLines(date: LocalDate): Pair<String, String> {
+    private fun dateParts(date: LocalDate): Triple<String, String, String> {
         val day = date.dayOfMonth
         val suffix = if (day % 100 in 11..13) "th" else when (day % 10) {
             1 -> "st"
@@ -601,17 +594,72 @@ class StatusService : Service() {
             3 -> "rd"
             else -> "th"
         }
-        val weekday = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)
-        val month = date.month.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)
-        return "$day$suffix $weekday" to month
+        return Triple(
+            "$day$suffix",
+            date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.ENGLISH),
+            date.month.getDisplayName(TextStyle.SHORT, Locale.ENGLISH),
+        )
     }
 
-    private fun buildDateNotification(date: LocalDate): Notification {
-        val (day, month) = dateIconLines(date)
+    private fun renderDayMonthIcon(date: LocalDate): Icon {
+        val density = resources.displayMetrics.density
+        val size = (48f * density).roundToInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = datePaint().apply { textAlign = Paint.Align.LEFT }
+        val dayText = date.dayOfMonth.toString()
+        val suffix = dateParts(date).first.removePrefix(dayText)
+
+        // Make the number full-height and tuck the ordinal beside it as a superscript.
+        paint.textSize = 33f * density
+        val suffixPaint = Paint(paint).apply { textSize = 15f * density }
+        var dayWidth = paint.measureText(dayText)
+        var suffixWidth = suffixPaint.measureText(suffix)
+        val gap = 1f * density
+        val maxWidth = size * 0.96f
+        val totalWidth = dayWidth + gap + suffixWidth
+        if (totalWidth > maxWidth) {
+            val scale = maxWidth / totalWidth
+            paint.textSize *= scale
+            suffixPaint.textSize *= scale
+            dayWidth = paint.measureText(dayText)
+            suffixWidth = suffixPaint.measureText(suffix)
+        }
+        val startX = (size - dayWidth - gap - suffixWidth) / 2f
+        canvas.drawText(dayText, startX, size * 0.50f, paint)
+        canvas.drawText(suffix, startX + dayWidth + gap, size * 0.27f, suffixPaint)
+
+        val month = dateParts(date).third
+        paint.textAlign = Paint.Align.CENTER
+        paint.textSize = 24f * density
+        val width = paint.measureText(month)
+        if (width > maxWidth) paint.textSize *= maxWidth / width
+        canvas.drawText(month, size / 2f, size * 0.88f, paint)
+        return Icon.createWithBitmap(bitmap)
+    }
+
+    private fun renderWeekdayIcon(date: LocalDate): Icon {
+        val density = resources.displayMetrics.density
+        val size = (48f * density).roundToInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val paint = datePaint().apply {
+            textAlign = Paint.Align.CENTER
+            textSize = 33f * density
+        }
+        val weekday = dateParts(date).second
+        val width = paint.measureText(weekday)
+        val maxWidth = size * 0.96f
+        if (width > maxWidth) paint.textSize *= maxWidth / width
+        Canvas(bitmap).drawText(weekday, size / 2f, size * 0.53f, paint)
+        return Icon.createWithBitmap(bitmap)
+    }
+
+    private fun buildDateNotification(date: LocalDate, weekdayIcon: Boolean): Notification {
+        val (day, weekday, month) = dateParts(date)
         val fullDate = date.format(DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy", Locale.ENGLISH))
         val builder = Notification.Builder(this, dateChannelId)
-            .setSmallIcon(renderDateIcon(date))
-            .setContentTitle("$day — $month")
+            .setSmallIcon(if (weekdayIcon) renderWeekdayIcon(date) else renderDayMonthIcon(date))
+            .setContentTitle(if (weekdayIcon) "Weekday: $weekday" else "$day $month")
             .setContentText(fullDate)
             .setContentIntent(noteIntent)
             .setOngoing(true)
@@ -629,16 +677,20 @@ class StatusService : Service() {
     private fun updateDateNotification() {
         if (!notificationEnabled || !showDateStatusBar) {
             noteMgr.cancel(dateNoteId)
+            noteMgr.cancel(weekdayNoteId)
             lastShownDate = null
             return
         }
         val date = LocalDate.now()
         if (lastShownDate == date) return
         try {
-            noteMgr.notify(dateNoteId, buildDateNotification(date))
+            // Newer notifications usually appear first; post weekday before day/month
+            // so the visual order beside Beam's watts icon is "31st Sat" over "Oct".
+            noteMgr.notify(weekdayNoteId, buildDateNotification(date, weekdayIcon = true))
+            noteMgr.notify(dateNoteId, buildDateNotification(date, weekdayIcon = false))
             lastShownDate = date
         } catch (e: RuntimeException) {
-            Log.e(this::class.java.name, "Failed to post date indicator", e)
+            Log.e(this::class.java.name, "Failed to post date indicators", e)
         }
     }
 
