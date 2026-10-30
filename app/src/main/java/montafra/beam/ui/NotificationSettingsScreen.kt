@@ -57,6 +57,7 @@ fun NotificationSettingsScreen(navController: BeamNavController) {
         mutableStateOf(prefs.getString("notificationIndicator", "W") ?: "W")
     }
     var showTimeToFull by remember { mutableStateOf(prefs.getBoolean("showTimeToFull", true)) }
+    var showDateStatusBar by remember { mutableStateOf(prefs.getBoolean("showDateStatusBar", false)) }
     var showScreenTimeInNotification by remember {
         mutableStateOf(prefs.getBoolean("showScreenTimeInNotification", false))
     }
@@ -178,6 +179,24 @@ fun NotificationSettingsScreen(navController: BeamNavController) {
                         onCheckedChange = {
                             showScreenTimeInNotification = it
                             prefs.edit().putBoolean("showScreenTimeInNotification", it).commit()
+                            context.sendBroadcast(
+                                Intent().setPackage(context.packageName).setAction(settingsUpdateInd)
+                            )
+                        },
+                    )
+                }
+                CardGap()
+                BeamCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = cardShapeMiddle(),
+                ) {
+                    ToggleSettingRow(
+                        title = stringResource(R.string.showDateStatusBar),
+                        description = stringResource(R.string.showDateStatusBarDesc),
+                        checked = showDateStatusBar,
+                        onCheckedChange = {
+                            showDateStatusBar = it
+                            prefs.edit().putBoolean("showDateStatusBar", it).commit()
                             context.sendBroadcast(
                                 Intent().setPackage(context.packageName).setAction(settingsUpdateInd)
                             )
