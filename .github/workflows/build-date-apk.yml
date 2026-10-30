@@ -28,8 +28,10 @@ jobs:
       # attempts to install the removed legacy "tools" package on newer SDKs.
       - name: Install Android API 36
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager_bin=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)
+          test -x "$sdkmanager_bin"
+          yes | "$sdkmanager_bin" --licenses > /dev/null || true
+          "$sdkmanager_bin" --install "platforms;android-36" "build-tools;36.0.0"
 
       - name: Build installable debug APK
         run: bash ./gradlew :app:assembleDebug --no-daemon
