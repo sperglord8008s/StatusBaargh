@@ -13,9 +13,12 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.util.Locale
 import androidx.core.content.edit
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -83,6 +86,8 @@ class StatusService : Service() {
     private var notificationIndicator: String = "W"
     private var showTimeToFull: Boolean = true
     private var showScreenTimeInNotification: Boolean = false
+    private var showDateStatusBar: Boolean = false
+    private var lastShownDate: LocalDate? = null
     private var pollIntervalMs: Long = intervalMs
     private val alarmLow = Alarm("alarmLow", alarmLowNoteId, alarmLowDefaultThreshold)
     private val alarmHigh = Alarm("alarmHigh", alarmHighNoteId, alarmHighDefaultThreshold)
@@ -170,6 +175,12 @@ class StatusService : Service() {
                 // open period would outlive the boot and restoreServiceState() would have to throw
                 // it away wholesale. Closing it here keeps the pre-shutdown on-time. The write has
                 // to block: apply() may not get to run before the process goes.
+                Intent.ACTION_DATE_CHANGED,
+                Intent.ACTION_TIME_CHANGED,
+                Intent.ACTION_TIMEZONE_CHANGED -> {
+                    lastShownDate = null
+                    updateDateNotification()
+                }
                 Intent.ACTION_SHUTDOWN -> {
                     closeScreenOnPeriod()
                     persistScreenTime(sync = true)
@@ -181,7 +192,10 @@ class StatusService : Service() {
     private fun loadSettings() {
         val settings = getSharedPreferences(settingsName, MODE_MULTI_PROCESS)
         notificationEnabled = settings.getBoolean("notificationEnabled", true)
-        if (!notificationEnabled) stopForeground(STOP_FOREGROUND_REMOVE)
+        if (!notificationEnabled) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            noteMgr.cancel(dateNoteId)
+        }
         battery.currentScalar = settings.getFloat("currentScalar", 1f).toDouble()
         battery.invertCurrent = settings.getBoolean("invertCurrent", false)
         useFahrenheit = settings.getBoolean("useFahrenheit", false)
@@ -195,6 +209,9 @@ class StatusService : Service() {
             ?: Typeface.DEFAULT_BOLD
         showTimeToFull = settings.getBoolean("showTimeToFull", true)
         showScreenTimeInNotification = settings.getBoolean("showScreenTimeInNotification", false)
+        showDateStatusBar = settings.getBoolean("showDateStatusBar", false)
+        // Refresh date icon even when the day is unchanged (font/theme settings can change).
+        lastShownDate = null
         pollIntervalMs = settings.getLong("pollIntervalMs", intervalMs)
         alarms.forEach { a ->
             a.enabled = settings.getBoolean("${a.prefix}Enabled", false)
@@ -441,6 +458,18 @@ class StatusService : Service() {
         )
         noteMgr.createNotificationChannel(
             NotificationChannel(
+                dateChannelId,
+                "Status-bar date",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Silent date indicator alongside battery power"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
+            }
+        )
+        noteMgr.createNotificationChannel(
+            NotificationChannel(
                 alarmChannelId,
                 getString(R.string.alarmChannelName),
                 NotificationManager.IMPORTANCE_HIGH
@@ -471,6 +500,9 @@ class StatusService : Service() {
                 addAction(Intent.ACTION_SCREEN_ON)
                 addAction(Intent.ACTION_USER_PRESENT)
                 addAction(Intent.ACTION_SHUTDOWN)
+                addAction(Intent.ACTION_DATE_CHANGED)
+                addAction(Intent.ACTION_TIME_CHANGED)
+                addAction(Intent.ACTION_TIMEZONE_CHANGED)
             },
             RECEIVER_NOT_EXPORTED,
         )
@@ -494,9 +526,12 @@ class StatusService : Service() {
         if (notificationEnabled) {
             try {
                 startForeground(noteId, buildNotification())
+                updateDateNotification()
             } catch (e: Exception) {
                 Log.e(this::class.java.name, "Failed to foreground StatusService", e)
             }
+        } else {
+            noteMgr.cancel(dateNoteId)
         }
 
         return START_STICKY
@@ -506,6 +541,7 @@ class StatusService : Service() {
         debug("onDestroy()")
         task.stop()
         if (initialized) unregisterReceiver(msgReceiver)
+        if (initialized) noteMgr.cancel(dateNoteId)
         super.onDestroy()
     }
 
@@ -533,6 +569,77 @@ class StatusService : Service() {
 
         // Hand over an immutable snapshot: the reused bitmap is erased on the next tick.
         return Icon.createWithBitmap(bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: bitmap)
+    }
+
+    /** Render two date lines into a second, silent status-bar icon. */
+    private fun renderDateIcon(date: LocalDate): Icon {
+        val density = resources.displayMetrics.density
+        val size = (48f * density).roundToInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val paint = Paint(iconPaint).apply { isAntiAlias = true }
+        val (firstLine, secondLine) = dateIconLines(date)
+        val maxWidth = size * 0.94f
+
+        fun drawLine(text: String, textSize: Float, baseline: Float) {
+            paint.textSize = textSize * density
+            val width = paint.measureText(text)
+            if (width > maxWidth) paint.textSize *= maxWidth / width
+            canvas.drawText(text, size / 2f, size * baseline, paint)
+        }
+
+        drawLine(firstLine, 20f, 0.45f)
+        drawLine(secondLine, 21f, 0.91f)
+        return Icon.createWithBitmap(bitmap)
+    }
+
+    private fun dateIconLines(date: LocalDate): Pair<String, String> {
+        val day = date.dayOfMonth
+        val suffix = if (day % 100 in 11..13) "th" else when (day % 10) {
+            1 -> "st"
+            2 -> "nd"
+            3 -> "rd"
+            else -> "th"
+        }
+        val weekday = date.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)
+        val month = date.month.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)
+        return "$day$suffix $weekday" to month
+    }
+
+    private fun buildDateNotification(date: LocalDate): Notification {
+        val (day, month) = dateIconLines(date)
+        val fullDate = date.format(DateTimeFormatter.ofPattern("EEEE, d MMMM yyyy", Locale.ENGLISH))
+        val builder = Notification.Builder(this, dateChannelId)
+            .setSmallIcon(renderDateIcon(date))
+            .setContentTitle("$day — $month")
+            .setContentText(fullDate)
+            .setContentIntent(noteIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+
+        return try {
+            builder.build()
+        } catch (e: RuntimeException) {
+            Log.w(this::class.java.name, "Rendered date icon rejected", e)
+            builder.setSmallIcon(R.drawable.ico_notification).build()
+        }
+    }
+
+    private fun updateDateNotification() {
+        if (!notificationEnabled || !showDateStatusBar) {
+            noteMgr.cancel(dateNoteId)
+            lastShownDate = null
+            return
+        }
+        val date = LocalDate.now()
+        if (lastShownDate == date) return
+        try {
+            noteMgr.notify(dateNoteId, buildDateNotification(date))
+            lastShownDate = date
+        } catch (e: RuntimeException) {
+            Log.e(this::class.java.name, "Failed to post date indicator", e)
+        }
     }
 
     private fun buildNotification(): Notification {
@@ -651,6 +758,7 @@ class StatusService : Service() {
         syncPlugState()
         reconcileScreenTime()
         if (notificationEnabled) noteMgr.notify(noteId, buildNotification())
+        updateDateNotification()
         checkAlarms()
         updateData()
     }
